@@ -19,13 +19,14 @@ pub unsafe extern "C" fn atomic_function_pointers(mut desired: callback) {
     let mut ptr: callback = None;
     let mut expected: callback = None;
     let mut result: callback = None;
-    ::core::intrinsics::atomic_store::<_, { ::core::intrinsics::AtomicOrdering::Release }>(
+    ::core::intrinsics::atomic_store::<_, { ::core::intrinsics::AtomicOrdering::Release }, false>(
         &raw mut ptr as *mut *mut (),
         ::core::mem::transmute::<callback, *mut ()>(desired),
     );
     result = ::core::mem::transmute::<*mut (), callback>(::core::intrinsics::atomic_load::<
         _,
         { ::core::intrinsics::AtomicOrdering::Acquire },
+        false,
     >(&raw mut ptr as *mut *mut ()));
     result = ::core::mem::transmute::<*mut (), callback>(::core::intrinsics::atomic_xchg::<
         _,
@@ -45,7 +46,7 @@ pub unsafe extern "C" fn atomic_function_pointers(mut desired: callback) {
     );
     *&raw mut expected = ::core::mem::transmute::<*mut (), callback>(c2rust_result.0);
     c2rust_result.1;
-    ::core::intrinsics::atomic_store::<_, { ::core::intrinsics::AtomicOrdering::Release }>(
+    ::core::intrinsics::atomic_store::<_, { ::core::intrinsics::AtomicOrdering::Release }, false>(
         &raw mut ptr as *mut *mut (),
         ::core::mem::transmute::<callback, *mut ()>(*&raw mut desired),
     );
@@ -53,6 +54,7 @@ pub unsafe extern "C" fn atomic_function_pointers(mut desired: callback) {
         ::core::mem::transmute::<*mut (), callback>(::core::intrinsics::atomic_load::<
             _,
             { ::core::intrinsics::AtomicOrdering::Acquire },
+            false,
         >(&raw mut ptr as *mut *mut ()));
     *&raw mut result =
         ::core::mem::transmute::<*mut (), callback>(::core::intrinsics::atomic_xchg::<
@@ -80,13 +82,14 @@ pub unsafe extern "C" fn c11_atomic_function_pointers(mut desired: callback) {
     let mut expected: callback = None;
     let mut result: callback = None;
     *&raw mut ptr = None;
-    ::core::intrinsics::atomic_store::<_, { ::core::intrinsics::AtomicOrdering::Release }>(
+    ::core::intrinsics::atomic_store::<_, { ::core::intrinsics::AtomicOrdering::Release }, false>(
         &raw mut ptr as *mut *mut (),
         ::core::mem::transmute::<callback, *mut ()>(desired),
     );
     result = ::core::mem::transmute::<*mut (), callback>(::core::intrinsics::atomic_load::<
         _,
         { ::core::intrinsics::AtomicOrdering::Acquire },
+        false,
     >(&raw mut ptr as *mut *mut ()));
     result = ::core::mem::transmute::<*mut (), callback>(::core::intrinsics::atomic_xchg::<
         _,
@@ -151,7 +154,7 @@ pub unsafe extern "C" fn sync_function_pointers(mut desired: callback) {
         ::core::mem::transmute::<callback, *mut ()>(desired),
     )
     .1;
-    ::core::intrinsics::atomic_store::<_, { ::core::intrinsics::AtomicOrdering::Release }>(
+    ::core::intrinsics::atomic_store::<_, { ::core::intrinsics::AtomicOrdering::Release }, false>(
         &raw mut ptr as *mut *mut (),
         ::core::ptr::null_mut(),
     );

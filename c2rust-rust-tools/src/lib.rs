@@ -41,7 +41,7 @@ impl RustEdition {
             // 1.70 (1.68 for syn v2.0, 1.70 for sparse registry)
             Edition2021 => "+nightly-2023-04-15",
             // This doesn't really need to be pinned, but pin it for stability.
-            Edition2024 => "+nightly-2026-03-03",
+            Edition2024 => "+nightly-2026-09-02",
         }
     }
 }
@@ -257,6 +257,9 @@ fn run_rustc(
             Edition2021 => format!("error[E0433]: failed to resolve: could not find `{imported_crate}` in the list of imported crates"),
             Edition2024 => format!("error[E0433]: cannot find `{imported_crate}` in the crate root"),
         };
+        // Newer nightlies word the edition 2024 error like the 2021 one, without "failed to resolve".
+        let absolute_path_imported_crates =
+            format!("error[E0433]: cannot find `{imported_crate}` in the list of imported crates");
         // For `use ::{imported_crate}*`.
         let absolute_use_path = format!("error[E0432]: unresolved import `{imported_crate}`");
         // For `{imported_crate}::*`.
@@ -273,7 +276,8 @@ fn run_rustc(
         dbg!(relative_path);
 
         // Pre-compute to avoid `||` short-circuiting.
-        let absolute_path = error_lines.remove(absolute_path);
+        let absolute_path = error_lines.remove(absolute_path)
+            | error_lines.remove(absolute_path_imported_crates.as_str());
         let absolute_use_path = error_lines.remove(absolute_use_path);
         let relative_path = error_lines.remove(relative_path);
 

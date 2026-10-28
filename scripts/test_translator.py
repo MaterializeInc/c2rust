@@ -478,6 +478,15 @@ class TestDirectory:
                 outcomes.append(TestOutcome.UnexpectedFailure)
                 continue
 
+            # Each C file is transpiled as its own crate, but becomes a module of the test crate,
+            # whose `lib.rs` registers the `c2rust` tool. Newer nightlies reject
+            # `#![register_tool]` outside the crate root, so drop the module's copy.
+            # (With `--emit-modules`, c2rust doesn't emit crate attributes in modules at all.)
+            rs_path = Path(translated_rust_file.path)
+            rs_text = rs_path.read_text()
+            rs_text = re.sub(r"(?m)^#!\[register_tool\(c2rust\)\]\n", "", rs_text)
+            rs_path.write_text(rs_text)
+
             self.generated_files["rust_src"].append(translated_rust_file)
             if c_file.emit_build_files:
                 self.generated_files["rust_src"].append(self.full_path + "/src/Cargo.toml")
@@ -537,7 +546,7 @@ class TestDirectory:
             case 2021:
                 toolchain = "nightly-2023-04-15"
             case 2024:
-                toolchain = "nightly-2026-03-03"
+                toolchain = "nightly-2026-09-02"
         rust_toolchain_toml = f"""\
 [toolchain]
 channel = "{toolchain}"

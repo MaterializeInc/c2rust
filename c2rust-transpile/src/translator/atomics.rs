@@ -118,11 +118,19 @@ impl<'c> Translation<'c> {
             _ => unimplemented!("unknown atomic intrinsic: {base_name}"),
         };
 
+        // `atomic_load` and `atomic_store` take a trailing `VOLATILE: bool` const parameter
+        // on newer nightlies (e.g. `nightly-2026-09-02`); `false` keeps the earlier behavior.
+        let num_trailing_bools = match base_name {
+            "load" | "store" => 1,
+            _ => 0,
+        };
+
         let args = repeat_n("_".to_owned(), num_ty_params)
             .chain(orders.iter().map(|&order| {
                 let order = order_ty_name(order);
                 format!("{{ ::core::intrinsics::AtomicOrdering::{order} }}")
             }))
+            .chain(repeat_n("false".to_owned(), num_trailing_bools))
             .join(", ");
         let path = format!("::core::intrinsics::atomic_{base_name}::<{args}>");
         // `mk()`/`Builder` doesn't seem to support const generic expressions,

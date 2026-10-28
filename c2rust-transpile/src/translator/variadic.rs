@@ -42,6 +42,17 @@ pub fn mk_va_list_ty(edition: RustEdition, lifetime: Option<&str>) -> Box<Type> 
     ])
 }
 
+pub fn mk_va_arg_method(edition: RustEdition) -> &'static str {
+    // `VaList::arg` was renamed to `VaList::next_arg` in
+    // <https://github.com/rust-lang/rust/pull/155614>, first in `nightly-2026-04-24`.
+    // `VaListImpl::arg`, used before edition 2024, keeps its name on its older toolchain.
+    if edition < Edition2024 {
+        "arg"
+    } else {
+        "next_arg"
+    }
+}
+
 pub fn mk_va_list_copy(edition: RustEdition, va_list: Box<Expr>) -> Box<Expr> {
     // This was updated in <https://github.com/rust-lang/rust/pull/141980>,
     // first changed in `nightly-2025-12-07`.
@@ -202,7 +213,7 @@ impl<'c> Translation<'c> {
                 let resolved_ctype = self.ast_context.resolve_type(p.ctype);
 
                 // The current implementation of the C-variadics feature doesn't allow us to
-                // return `Option<fn(...) -> _>` from `VaList::arg`, so we detect function pointers
+                // return `Option<fn(...) -> _>` from `VaList::next_arg`, so we detect function pointers
                 // and construct the corresponding unsafe type `* mut fn(...) -> _`.
                 if let CTypeKind::Function(ret, ref params, is_variadic, is_noreturn, _) =
                     resolved_ctype.kind
@@ -234,8 +245,10 @@ impl<'c> Translation<'c> {
         let arg_ty = arg_ty.unwrap_or_else(|| self.convert_type(ty.ctype).unwrap());
 
         Ok(val.and_then(|val| {
-            let path = mk()
-                .path_segment_with_args(mk().ident("arg"), mk().angle_bracketed_args(vec![arg_ty]));
+            let path = mk().path_segment_with_args(
+                mk().ident(mk_va_arg_method(self.tcfg.edition)),
+                mk().angle_bracketed_args(vec![arg_ty]),
+            );
             let mut val = mk().method_call_expr(val, path, vec![]);
 
             if !ctx.is_used() {
@@ -254,7 +267,7 @@ impl<'c> Translation<'c> {
                             // An enclosing cast or field access may prevent
                             // inference of the transmute's destination type.
                             // For `callbacks.fn = va_arg(arg, char_to_int_fp)`, emit
-                            // `transmute::<_, char_to_int_fp>(arg.arg::<*mut Fn>())
+                            // `transmute::<_, char_to_int_fp>(arg.next_arg::<*mut Fn>())
                             // as Option<Fn>`, where Fn abbreviates the underlying
                             // `unsafe extern "C" fn(c_char) -> c_int` signature.
                             // With `transmute::<_, _>(...)`, inference fails:

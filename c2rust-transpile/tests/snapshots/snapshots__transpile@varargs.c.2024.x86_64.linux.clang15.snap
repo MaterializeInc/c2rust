@@ -74,19 +74,19 @@ pub unsafe extern "C" fn my_printf(mut fmt: *const ::core::ffi::c_char, mut c2ru
                         105 | 100 => {
                             printf(
                                 b"%d\0".as_ptr() as *const ::core::ffi::c_char,
-                                ap.arg::<::core::ffi::c_int>(),
+                                ap.next_arg::<::core::ffi::c_int>(),
                             );
                         }
                         102 => {
                             printf(
                                 b"%f\0".as_ptr() as *const ::core::ffi::c_char,
-                                ap.arg::<::core::ffi::c_double>(),
+                                ap.next_arg::<::core::ffi::c_double>(),
                             );
                         }
                         115 => {
                             printf(
                                 b"%s\0".as_ptr() as *const ::core::ffi::c_char,
-                                ap.arg::<*mut ::core::ffi::c_char>(),
+                                ap.next_arg::<*mut ::core::ffi::c_char>(),
                             );
                         }
                         _ => {}
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn restart_valist(mut fmt: *const ::core::ffi::c_char, mut
 pub unsafe extern "C" fn print_int(mut ap: *mut ::core::ffi::VaList) {
     printf(
         b"%d\0".as_ptr() as *const ::core::ffi::c_char,
-        (*ap).arg::<::core::ffi::c_int>(),
+        (*ap).next_arg::<::core::ffi::c_int>(),
     );
 }
 #[unsafe(no_mangle)]
