@@ -324,7 +324,7 @@ struct BidirAsmOperand {
     mem_only: bool,
     constraints: String,
     name: Option<String>,
-    // At least one of these is non-None
+    // At least one of these is non-None, except for a scratch output, which is discarded (`_`)
     in_expr: Option<(usize, CExprId)>,
     out_expr: Option<(usize, CExprId)>,
 }
@@ -346,86 +346,141 @@ impl BidirAsmOperand {
     }
 }
 
-/// Return the register and corresponding template modifiers if the constraint
-/// uses a reserved register.
-fn reg_is_reserved(constraint: &str, arch: Arch) -> Option<(&str, &str)> {
-    Some(match arch {
-        Arch::X86 => match constraint {
-            // esi is reserved on x86
-            "\"esi\"" | "\"si\"" => {
-                let reg = constraint.trim_matches('"');
-                // "e" if esi, "" if si
-                let mods = &reg[..reg.len() - 2];
-                (reg, mods)
-            }
-            _ => return None,
-        },
-        Arch::X86_64 => match constraint {
-            // rbx is reserved on x86_64
-            "\"bl\"" | "\"bh\"" | "\"bx\"" | "\"ebx\"" | "\"rbx\"" => {
-                let reg = constraint.trim_matches('"');
-                let mods = if reg.len() == 2 {
-                    &reg[1..] // l/h/x
-                } else {
-                    &reg[..1] // e/r
-                };
-                (reg, mods)
-            }
-            _ => return None,
-        },
-        _ => return None,
-    })
+/// A register that rustc refuses as an `asm!` operand or clobber but that C inline assembly
+/// may name, e.g. `rbx` on x86_64, which LLVM reserves for its own use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ReservedReg {
+    /// The full-width register, e.g. `rbx` for any of `bl`, `bh`, `bx`, `ebx` and `rbx`.
+    full: &'static str,
+    /// The template modifier that formats a `reg` operand at the register's full width.
+    full_mod: char,
 }
 
-/// Emit mov instructions and modify inline assembly operands to copy in and/or
-/// out when an operand uses a reserved register. Instead of constraining the
-/// operand to the reserved register, constrain it to any register and then copy
-/// between the reserved register and the (suitably modified, e.g. `{0:x}`)
-/// operand.
-/// This also requires reordering the operands because we convert them to
-/// named operands, which must precede explicit register operands.
+/// If `reg` (a register name, without quotes or `%`) is one that rustc refuses in `asm!`,
+/// return `Ok` with the register to save and restore around the template,
+/// or `Err` with the reason if it can't be saved and restored.
+fn reserved_reg(reg: &str, arch: Arch) -> Option<Result<ReservedReg, String>> {
+    let saved = |full, full_mod| Some(Ok(ReservedReg { full, full_mod }));
+    let unsupported = |what: &str| {
+        Some(Err(format!(
+            "inline assembly uses {what} ({reg}), which Rust's asm! cannot use \
+            as an operand or clobber, and which cannot be saved and restored around the template"
+        )))
+    };
+    match arch {
+        Arch::X86_64 => match reg {
+            // rustc: "rbx is used internally by LLVM and cannot be used as an operand"
+            "bl" | "bh" | "bx" | "ebx" | "rbx" => saved("rbx", 'r'),
+            // rustc: "the frame pointer cannot be used as an operand"
+            "bpl" | "bp" | "ebp" | "rbp" => saved("rbp", 'r'),
+            "spl" | "sp" | "esp" | "rsp" => unsupported("the stack pointer"),
+            "ip" | "eip" | "rip" => unsupported("the instruction pointer"),
+            _ => None,
+        },
+        Arch::X86 => match reg {
+            // rustc: "esi is used internally by LLVM and cannot be used as an operand"
+            "si" | "esi" => saved("esi", 'e'),
+            "bp" | "ebp" => saved("ebp", 'e'),
+            "sp" | "esp" => unsupported("the stack pointer"),
+            "ip" | "eip" => unsupported("the instruction pointer"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Handle operands and clobbers that use registers rustc refuses in `asm!` (see
+/// [`reserved_reg`]), which C allows, e.g. the `%ebx` clobber of a `cpuid`.
 ///
-/// Modifies `operands` and returns a pair of prefix and suffix strings that
-/// should be appended to the assembly template.
-fn rewrite_reserved_reg_operands(
+/// Each such register is saved to a scratch register (a named `out(reg) _` operand) before
+/// the template and restored from it afterwards, as `core::arch::x86_64::__cpuid` does for
+/// `rbx`, so the code around the asm sees it unchanged, as it would if the compiler had
+/// honored the clobber.
+///
+/// An operand constrained to such a register is instead constrained to any register, and
+/// copied into the reserved register after the save (if it's an input) and out of it before
+/// the restore (if it's an output). This requires reordering the operands, because we convert
+/// them to named operands, which must precede explicit register operands.
+///
+/// Modifies `operands` and returns the prolog and epilog to wrap the template in, and the
+/// indices of the rewritten operands, which the template must not reference, since in C
+/// such a reference names the reserved register itself.
+fn rewrite_reserved_regs(
     att_syntax: bool,
     arch: Arch,
-    operands: &mut [BidirAsmOperand],
-) -> (String, String) {
-    let (mut prolog, mut epilog) = (String::new(), String::new());
+    operands: &mut Vec<BidirAsmOperand>,
+    clobbers: &[String],
+) -> TranslationResult<(String, String, Vec<usize>)> {
+    let mov = |dst: &str, src: &str| {
+        if att_syntax {
+            format!("mov {src}, {dst}")
+        } else {
+            format!("mov {dst}, {src}")
+        }
+    };
+    let reg_ref = |reg: &ReservedReg| {
+        if att_syntax {
+            format!("%{}", reg.full)
+        } else {
+            reg.full.to_owned()
+        }
+    };
+    let operand_ref = |name: &str, reg: &ReservedReg| format!("{{{name}:{}}}", reg.full_mod);
+    let lookup = |reg: &str| match reserved_reg(reg, arch) {
+        Some(Err(e)) => Err(format_translation_err!(None, "{e}")),
+        Some(Ok(reserved)) => Ok(Some(reserved)),
+        None => Ok(None),
+    };
 
-    let mut rewrite_idxs = vec![];
-    let mut total_positional = 0;
+    let mut saved: Vec<ReservedReg> = vec![];
+    let (mut copy_in, mut copy_out) = (vec![], vec![]);
 
     // Determine which operands must be rewritten and how many
     // positional operands there are. Positional operands must precede named
     // operands, so this tells us where to reinsert operands we rewrite.
+    let mut rewrite_idxs = vec![];
+    let mut total_positional = 0;
     for (i, operand) in operands.iter().enumerate() {
         if operand.is_positional() {
             total_positional += 1;
-        } else if let Some((reg, mods)) = reg_is_reserved(&operand.constraints, arch) {
-            rewrite_idxs.push((i, reg.to_owned(), mods.to_owned()));
+            continue;
+        }
+        if !operand.constraints.starts_with('"') {
+            continue;
+        }
+        let reg = operand.constraints.trim_matches('"');
+        if let Some(reserved) = lookup(reg)? {
+            if reg == "bh" {
+                // Copying the full register would move bits 0..8, not 8..16.
+                return Err(TranslationError::generic(
+                    "inline assembly operand uses bh, which Rust's asm! cannot use \
+                    as an operand on x86_64",
+                ));
+            }
+            rewrite_idxs.push((i, reserved));
         }
     }
 
-    for (n_moved, (idx, reg, mods)) in rewrite_idxs.into_iter().enumerate() {
+    let mut rewritten = vec![];
+    for (n_moved, (idx, reserved)) in rewrite_idxs.into_iter().enumerate() {
         let operand = &mut operands[idx];
         let name = format!("restmp{}", n_moved);
-        if let Some((_idx, _in_expr)) = operand.in_expr {
-            let move_input = if att_syntax {
-                format!("mov %{}, {{{}:{}}}\n", reg, name, mods)
-            } else {
-                format!("mov {{{}:{}}}\n, {}", name, mods, reg)
-            };
-            prolog.push_str(&move_input);
+        // Copy at full width: C leaves the bits beyond the operand's type unspecified,
+        // so this is equivalent, and it reads back the narrower value in the low bits.
+        // A `+` operand is an input through its dir spec, with only an `out_expr`.
+        let is_input = operand.in_expr.is_some()
+            || matches!(
+                operand.dir_spec,
+                ArgDirSpec::In | ArgDirSpec::InOut | ArgDirSpec::InLateOut
+            );
+        if is_input {
+            copy_in.push(mov(&reg_ref(&reserved), &operand_ref(&name, &reserved)));
         }
-        if let Some((_idx, _out_expr)) = operand.out_expr {
-            let move_output = if att_syntax {
-                format!("\nmov {{{}:{}}}, %{}", name, mods, reg)
-            } else {
-                format!("\nmov {}, {{{}:{}}}", reg, name, mods)
-            };
-            epilog.push_str(&move_output);
+        if operand.out_expr.is_some() {
+            copy_out.push(mov(&operand_ref(&name, &reserved), &reg_ref(&reserved)));
+        }
+        if !saved.contains(&reserved) {
+            saved.push(reserved);
         }
         operand.constraints = "reg".into();
         operand.name = Some(name);
@@ -434,12 +489,49 @@ fn rewrite_reserved_reg_operands(
         // interfere with moving subsequent operands that use reserved registers
         // because explicit register operands must all come after positional
         // and named operands.
-        //let (positional, named, explicit) = split_operands(operands);
         let nth_non_positional = total_positional + n_moved;
         operands.swap(idx, nth_non_positional);
+        rewritten.push(nth_non_positional);
     }
 
-    (prolog, epilog)
+    for clobber in clobbers {
+        if let Some(reserved) = lookup(clobber)? {
+            if !saved.contains(&reserved) {
+                saved.push(reserved);
+            }
+        }
+    }
+
+    let (mut prolog, mut epilog) = (vec![], vec![]);
+    let insert_at = total_positional + rewritten.len();
+    for (n, reserved) in saved.iter().enumerate() {
+        let name = format!("c2rust_save_{}", reserved.full);
+        prolog.push(mov(&operand_ref(&name, reserved), &reg_ref(reserved)));
+        epilog.push(mov(&reg_ref(reserved), &operand_ref(&name, reserved)));
+        // A scratch output that isn't late, so it can't share a register with any input or
+        // output, holds the saved value across the whole template.
+        operands.insert(
+            insert_at + n,
+            BidirAsmOperand {
+                dir_spec: ArgDirSpec::Out,
+                mem_only: false,
+                constraints: "reg".into(),
+                name: Some(name),
+                in_expr: None,
+                out_expr: None,
+            },
+        );
+    }
+    prolog.extend(copy_in);
+    copy_out.extend(epilog);
+    let epilog = copy_out;
+
+    let prolog = prolog.into_iter().map(|line| line + "\n").collect();
+    let epilog = epilog
+        .into_iter()
+        .map(|line| "\n".to_owned() + &line)
+        .collect();
+    Ok((prolog, epilog, rewritten))
 }
 
 /// Remove comments from an x86 assembly template. Used only to provide a less-
@@ -851,8 +943,9 @@ impl<'c> Translation<'c> {
         // Sort positional args before named ones.
         args.sort_by_key(|arg| !arg.is_positional());
 
-        // Add workaround for reserved registers (e.g. rbx on x86_64)
-        let (prolog, epilog) = rewrite_reserved_reg_operands(att_syntax, arch, &mut args);
+        // Save and restore reserved registers (e.g. rbx on x86_64) that operands or clobbers use
+        let (prolog, epilog, reserved_operand_idxs) =
+            rewrite_reserved_regs(att_syntax, arch, &mut args, clobbers)?;
 
         // Find new idx by searching args for one with this original idx
         let new_idx_for_orig = |orig_idx| {
@@ -882,6 +975,20 @@ impl<'c> Translation<'c> {
             },
             arch,
         )?;
+
+        // In C, a reference to an operand constrained to a reserved register names that
+        // register, which the template may also use implicitly (as `cpuid` does), and we can't
+        // tell which; the rewritten operand only holds the value outside the template.
+        let referenced = referenced_operand_indices(&rewritten_asm);
+        if reserved_operand_idxs
+            .iter()
+            .any(|idx| referenced.contains(idx))
+        {
+            return Err(TranslationError::generic(
+                "inline assembly template references an operand constrained to a register \
+                that Rust's asm! cannot use as an operand (e.g. rbx on x86_64)",
+            ));
+        }
 
         let mut rewritten_asm = prolog + &rewritten_asm + &epilog;
 
@@ -1044,6 +1151,9 @@ impl<'c> Translation<'c> {
             }
             if let Some(out_expr) = out_expr {
                 push_expr(&mut tokens, out_expr);
+            } else if operand.in_expr.is_none() {
+                // A scratch output, e.g. for saving a reserved register
+                tokens.push(TokenTree::Ident(Ident::new("_", Span::call_site())));
             }
         }
 
@@ -1062,18 +1172,8 @@ impl<'c> Translation<'c> {
                 continue;
             };
 
-            // We must drop clobbers of reserved registers, even though this
-            // really means we're misinforming the compiler of what's been
-            // overwritten. Warn verbosely.
-            let quoted = format!("\"{}\"", clobber);
-            if reg_is_reserved(&quoted, arch).is_some() {
-                warn!(
-                    "Attempting to clobber reserved register ({}), dropping clobber! \
-                This likely means the potential for miscompilation has been introduced. \
-                Please rewrite this assembly to save/restore the value of this register \
-                if at all possible.",
-                    clobber
-                );
+            // Reserved registers are saved and restored by `rewrite_reserved_regs` instead
+            if reserved_reg(clobber, arch).is_some() {
                 continue;
             }
 

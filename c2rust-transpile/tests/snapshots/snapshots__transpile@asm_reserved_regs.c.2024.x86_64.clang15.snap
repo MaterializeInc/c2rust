@@ -1,0 +1,61 @@
+---
+source: c2rust-transpile/tests/snapshots.rs
+expression: cat tests/snapshots/arch-specific/asm_reserved_regs.2024.x86_64.clang15.rs
+---
+#![allow(
+    clippy::missing_safety_doc,
+    dead_code,
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    unsafe_op_in_unsafe_fn,
+    unused_assignments,
+    unused_mut
+)]
+use ::core::arch::asm;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cpuid_ecx_clobber() -> ::core::ffi::c_uint {
+    let mut eax: ::core::ffi::c_uint = 1 as ::core::ffi::c_uint;
+    let mut ecx: ::core::ffi::c_uint = 0;
+    asm!(
+        "mov %rbx, {c2rust_save_rbx:r}\n", "cpuid\n", "mov {c2rust_save_rbx:r}, %rbx\n",
+        c2rust_save_rbx = out(reg) _, lateout("cx") ecx, inlateout("ax") eax => _,
+        out("edx") _, options(preserves_flags, pure, readonly, att_syntax)
+    );
+    return ecx;
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cpuid_ebx_operand() -> ::core::ffi::c_uint {
+    let mut eax: ::core::ffi::c_uint = 0 as ::core::ffi::c_uint;
+    let mut ebx: ::core::ffi::c_uint = 0;
+    let mut ecx: ::core::ffi::c_uint = 0;
+    let mut edx: ::core::ffi::c_uint = 0;
+    asm!(
+        "mov %rbx, {c2rust_save_rbx:r}\n", "cpuid\n", "mov %rbx, {restmp0:r}\n",
+        "mov {c2rust_save_rbx:r}, %rbx\n", restmp0 = lateout(reg) ebx, c2rust_save_rbx =
+        out(reg) _, inlateout("ax") eax, lateout("cx") ecx, lateout("dx") edx,
+        options(preserves_flags, pure, readonly, att_syntax)
+    );
+    return ebx;
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ebx_input(mut x: ::core::ffi::c_uint) -> ::core::ffi::c_uint {
+    let mut out: ::core::ffi::c_uint = 0;
+    asm!(
+        "mov %rbx, {c2rust_save_rbx:r}\n", "mov {restmp0:r}, %rbx\n",
+        "movl %ebx, %eax\n", "\taddl %ebx, %eax\n", "mov {c2rust_save_rbx:r}, %rbx\n",
+        restmp0 = inlateout(reg) x => _, c2rust_save_rbx = out(reg) _, lateout("ax") out,
+        options(preserves_flags, pure, readonly, att_syntax)
+    );
+    return out;
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ebx_inout(mut x: ::core::ffi::c_uint) -> ::core::ffi::c_uint {
+    asm!(
+        "mov %rbx, {c2rust_save_rbx:r}\n", "mov {restmp0:r}, %rbx\n",
+        "addl %ebx, %ebx\n", "mov %rbx, {restmp0:r}\n",
+        "mov {c2rust_save_rbx:r}, %rbx\n", restmp0 = inlateout(reg) x, c2rust_save_rbx =
+        out(reg) _, options(preserves_flags, pure, readonly, att_syntax)
+    );
+    return x;
+}

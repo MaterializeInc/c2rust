@@ -566,6 +566,11 @@ fn test_asm_unused_operand() {
 }
 
 #[test]
+fn test_asm_reserved_regs() {
+    transpile("asm_reserved_regs.c").arch_specific(true).run();
+}
+
+#[test]
 fn test_spin() {
     transpile("spin.c").arch_specific(true).run();
 }
