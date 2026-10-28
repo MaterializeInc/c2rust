@@ -14,9 +14,7 @@ expression: cat tests/snapshots/arch-specific/asm_unused_operand.2024.aarch64.cl
 )]
 use ::core::arch::asm;
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn barrier(
-    mut x: *const ::core::ffi::c_void,
-) -> *const ::core::ffi::c_void {
+pub unsafe extern "C" fn barrier(mut x: *const ::core::ffi::c_void) -> *const ::core::ffi::c_void {
     asm!("\n", "/* {0} */\n", inlateout(reg) x, options(preserves_flags));
     return x;
 }
