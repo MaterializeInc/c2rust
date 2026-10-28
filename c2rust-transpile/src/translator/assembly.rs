@@ -1,6 +1,7 @@
 #![deny(missing_docs)]
 //! This module provides basic support for converting inline assembly statements.
 
+use std::collections::HashSet;
 use std::fmt::{self as fmt, Display, Formatter};
 
 use crate::diagnostics::TranslationResult;
@@ -554,6 +555,30 @@ fn tied_output_operand_idx(
     idx
 }
 
+/// Return the operand indices referenced as `{N}` or `{N:modifier}` in an asm! template,
+/// skipping escaped braces (`{{`).
+fn referenced_operand_indices(template: &str) -> HashSet<usize> {
+    let mut indices = HashSet::new();
+    let mut chars = template.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        if c != '{' {
+            continue;
+        }
+        if let Some(&(_, '{')) = chars.peek() {
+            chars.next();
+            continue;
+        }
+        let digits: String = template[start + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(idx) = digits.parse() {
+            indices.insert(idx);
+        }
+    }
+    indices
+}
+
 /// Rewrite a LLVM inline assembly template string into an asm!-compatible one
 /// by translating its references to operands (of the form $0 or $x0) to {0} or
 /// {0:y} (and wrapping mem-only references in square brackets).
@@ -858,7 +883,21 @@ impl<'c> Translation<'c> {
             arch,
         )?;
 
-        let rewritten_asm = prolog + &rewritten_asm + &epilog;
+        let mut rewritten_asm = prolog + &rewritten_asm + &epilog;
+
+        // Rust rejects positional operands the template never references ("argument never
+        // used"); C doesn't, e.g. `asm volatile("" : "+r"(x))` as an optimization barrier.
+        // Reference them in an asm comment, as rustc suggests, keeping the operand semantics.
+        let referenced = referenced_operand_indices(&rewritten_asm);
+        let unused = args
+            .iter()
+            .enumerate()
+            .filter(|(idx, operand)| operand.is_positional() && !referenced.contains(idx))
+            .map(|(idx, _)| format!("{{{idx}}}"))
+            .collect::<Vec<_>>();
+        if !unused.is_empty() {
+            rewritten_asm.push_str(&format!("\n/* {} */", unused.join(" ")));
+        }
 
         // Emit assembly template
         for line in rewritten_asm.split('\n') {
